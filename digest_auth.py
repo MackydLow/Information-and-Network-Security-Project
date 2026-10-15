@@ -62,27 +62,32 @@ class DigestAuthMiddleware(RequestHandlerABC):
         if not data or auth_type != "Digest":
             return False
 
+        #turn the parameters into a dictionary of key-value pairs
         try:
             params = parse_keqv_list(parse_http_list(data))
         except ValueError:
             LOG.warning("Invalid Digest authentication header")
             return False
 
+        #Every field used below must be present, Reading a missing key
         required_fields = ["username", "realm", "nonce", "uri", "response", "qop", "nc", "cnonce"]
         if not all(field in params for field in required_fields):
             LOG.warning("Missing required fields in Digest authentication header")
             return False
 
+        #Look up the user. .get() returns None(instead of crashing) where username not in field
         username = params["username"]
         stored_hash = self.users.get(username)
         if not stored_hash:
             LOG.warning(f"Digest authentication: unknown user '{username}'")
             return False
 
+        # The client must be answering a challenge with the correct realm, and the nonce must be valid and not expired
         if params["realm"] != self.realm:
             LOG.warning("Digest authentication: realm mismatch")
             return False
-        
+
+        # Check the nonce is valid and not expired
         nonce = params["nonce"]
         issued_at = self.nonces.get(nonce)
         if issued_at is None:
@@ -91,29 +96,36 @@ class DigestAuthMiddleware(RequestHandlerABC):
             del self.nonces[nonce]
             return False
 
+        # Check that the qop is "auth" and that the URI matches the request path
         if params["qop"] != "auth":
             LOG.warning("Digest authentication: unsupported qop value")
             return False
 
+        # Check that the URI matches the request path
         if params["uri"] != request.path:
             LOG.warning("Digest authentication: URI mismatch")
             return False
 
+        # Compute the expected response hash based on the stored password hash and the request parameters
         ha1 = self._sha256(f"{username}:{self.realm}:{stored_hash}")
 
+        # Compute HA2 based on the request method and URI
         ha2 = self._sha256(f"{request.method}:{params['uri']}")
 
+        # Compute the expected response hash based on the stored password hash and the request parameters
         expected = self._sha256(
             f"{ha1}:{nonce}:{params['nc']}:{params['cnonce']}:{params['qop']}:{ha2}"
         )
 
+        # Compare the expected response with the one provided in the Authorization header using hmac.compare_digest for security
         if hmac.compare_digest(expected.encode("utf-8"), params["response"].encode("utf-8")):
             LOG.debug("Digest authentication correct credentials.")
             return True
 
+        # Log a warning if the credentials are incorrect
         LOG.warning("Digest authentication incorrect credentials.")
         return False
-    
+
     @staticmethod
     def _sha256(text: str) -> str:
         return hashlib.sha256(text.encode("utf-8")).hexdigest()
