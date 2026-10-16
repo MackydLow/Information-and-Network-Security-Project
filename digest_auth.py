@@ -13,10 +13,11 @@ LOG = log.getLogger("middlewares.digest_auth")
 
 #nonce is alive for 300 seconds, after this client gets a new 401 challenge with a fresh nonce
 NONCE_LIFETIME = 300
-"""Middle ware that implements HTTP Digest Authentication."""
+
 class DigestAuthMiddleware(RequestHandlerABC):
-    """Set up the middleware and load the user directory from the password file"""
+    """Middle ware that implements HTTP Digest Authentication."""
     def __init__(self, next: RequestHandler, pwdfile: str):
+        """Set up the middleware and load the user directory from the password file"""
         self.next = next #process request once they are authenticated
         self.pwdfile = pwdfile #remeber where password file is
         self.http = HTTPResponseFactory(NO_CACHE_HEADERS)
@@ -31,33 +32,36 @@ class DigestAuthMiddleware(RequestHandlerABC):
                 username, pw_hash = line.split(":", 1) #split on the first colon
                 self.users[username] = pw_hash.lower() #store hash in lowercase
 
+        #the realm names the protected area, sent to the client
         self.realm = "py_http_server"
+
+        # Dictionary to store nonces and their issue times
         self.nonces: dict[str, float] = {}
 
-    """Create a new random nonce record when it was issued and return"""
     def _generate_nonce(self) -> str:
+        """Create a new random nonce record when it was issued and return"""
         nonce = secrets.token_hex(16)
         self.nonces[nonce] = time.time()
         return nonce
 
-    """Build a 401 unathorized response containing a fresh Digest challenge"""
     def _unauthorized(self):
+        """Build a 401 unathorized response containing a fresh Digest challenge"""
         challenge = (
             f'Digest realm="{self.realm}", qop="auth", '
             f'algorithm=SHA-256, nonce="{self._generate_nonce()}"'
         )
         return self.http.status(401, HeaderContainer({"WWW-Authenticate": challenge}))
 
-    """Handle an incoming request" let it through or reject it with a 401"""
     def __call__(self, conn_info: ConnectionInfo, request: HTTPRequest):
+        """Handle an incoming request" let it through or reject it with a 401"""
         if "Authorization" in request.headers and self._verify_authorization(
             request.headers["Authorization"], request
             ):
             return self.next(conn_info, request)
         return self._unauthorized()
 
-    """Parse and check a Digest Authorization header"""
     def _verify_authorization(self, header_value: str, request: HTTPRequest) -> bool:
+        """Parse and check a Digest Authorization header"""
         auth_type, _, data = header_value.partition(" ")
         if not data or auth_type != "Digest":
             return False
@@ -69,25 +73,26 @@ class DigestAuthMiddleware(RequestHandlerABC):
             LOG.warning("Invalid Digest authentication header")
             return False
 
-        #Every field used below must be present, Reading a missing key
+        # Every field used below must be present; reading a missing key would raise KeyError 
         required_fields = ["username", "realm", "nonce", "uri", "response", "qop", "nc", "cnonce"]
         if not all(field in params for field in required_fields):
             LOG.warning("Missing required fields in Digest authentication header")
             return False
 
-        #Look up the user. .get() returns None(instead of crashing) where username not in field
+        # Look up the user. .get() returns None (instead of crashing) if the username is not in the password file.
         username = params["username"]
         stored_hash = self.users.get(username)
         if not stored_hash:
             LOG.warning(f"Digest authentication: unknown user '{username}'")
             return False
 
-        # The client must be answering a challenge with the correct realm, and the nonce must be valid and not expired
+        # The client must be answering a challenge for this server's realm
         if params["realm"] != self.realm:
             LOG.warning("Digest authentication: realm mismatch")
             return False
 
-        # Check the nonce is valid and not expired
+        # The Nonce must be one we issued and not expired. This stops an attacker
+        # replaying an Authorization header they captured earlier 
         nonce = params["nonce"]
         issued_at = self.nonces.get(nonce)
         if issued_at is None:
@@ -96,17 +101,19 @@ class DigestAuthMiddleware(RequestHandlerABC):
             del self.nonces[nonce]
             return False
 
-        # Check that the qop is "auth" and that the URI matches the request path
+        # Only the qop="auth" was offered in the challendge, so accept nothing else
         if params["qop"] != "auth":
             LOG.warning("Digest authentication: unsupported qop value")
             return False
 
-        # Check that the URI matches the request path
+        # Check that the URI matches the request path. This stops a valid header
+        # for one page being reused to fetch a different page
         if params["uri"] != request.path:
             LOG.warning("Digest authentication: URI mismatch")
             return False
 
-        # Compute the expected response hash based on the stored password hash and the request parameters
+        # HA1 = hash of "who you are". passwords.txt stores SHA245(password),
+        # not the plain text, so the stored hash is used as the shared secret
         ha1 = self._sha256(f"{username}:{self.realm}:{stored_hash}")
 
         # Compute HA2 based on the request method and URI
@@ -117,7 +124,9 @@ class DigestAuthMiddleware(RequestHandlerABC):
             f"{ha1}:{nonce}:{params['nc']}:{params['cnonce']}:{params['qop']}:{ha2}"
         )
 
-        # Compare the expected response with the one provided in the Authorization header using hmac.compare_digest for security
+        # Compare the expected response with the client's. compare_digest takes the
+        # same time however many characters match, so an attacker can't use 
+        # response timing to guess the hash
         if hmac.compare_digest(expected.encode("utf-8"), params["response"].encode("utf-8")):
             LOG.debug("Digest authentication correct credentials.")
             return True
@@ -128,6 +137,7 @@ class DigestAuthMiddleware(RequestHandlerABC):
 
     @staticmethod
     def _sha256(text: str) -> str:
+        """Return the SHA-256 hash of text as a 64-character hex string"""
         return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
