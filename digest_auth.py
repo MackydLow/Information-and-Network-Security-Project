@@ -15,7 +15,7 @@ LOG = log.getLogger("middlewares.digest_auth")
 NONCE_LIFETIME = 300
 
 class DigestAuthMiddleware(RequestHandlerABC):
-    """Middle ware that implements HTTP Digest Authentication."""
+    """Middleware that implements HTTP Digest Authentication."""
     def __init__(self, next: RequestHandler, pwdfile: str):
         """Set up the middleware and load the user directory from the password file"""
         self.next = next #process request once they are authenticated
@@ -38,9 +38,11 @@ class DigestAuthMiddleware(RequestHandlerABC):
         # Dictionary to store nonces and their issue times
         self.nonces: dict[str, float] = {}
 
+    #a nonce is a random string that the server invents and remembers 
     def _generate_nonce(self) -> str:
         """Create a new random nonce record when it was issued and return"""
         nonce = secrets.token_hex(16)
+        #record when nonce was created for server timeouts
         self.nonces[nonce] = time.time()
         return nonce
 
@@ -48,6 +50,7 @@ class DigestAuthMiddleware(RequestHandlerABC):
         """Build a 401 unathorized response containing a fresh Digest challenge"""
         challenge = (
             f'Digest realm="{self.realm}", qop="auth", '
+            #create a nonce
             f'algorithm=SHA-256, nonce="{self._generate_nonce()}"'
         )
         return self.http.status(401, HeaderContainer({"WWW-Authenticate": challenge}))
@@ -61,7 +64,7 @@ class DigestAuthMiddleware(RequestHandlerABC):
         return self._unauthorized()
 
     def _verify_authorization(self, header_value: str, request: HTTPRequest) -> bool:
-        """Parse and check a Digest Authorization header"""
+        """Parse and check a Digest Authorization header. this decides if the request passes"""
         auth_type, _, data = header_value.partition(" ")
         if not data or auth_type != "Digest":
             return False
@@ -112,7 +115,7 @@ class DigestAuthMiddleware(RequestHandlerABC):
             LOG.warning("Digest authentication: URI mismatch")
             return False
 
-        # HA1 = hash of "who you are". passwords.txt stores SHA245(password),
+        # HA1 = hash of "who you are". passwords.txt stores SHA256(password),
         # not the plain text, so the stored hash is used as the shared secret
         ha1 = self._sha256(f"{username}:{self.realm}:{stored_hash}")
 
