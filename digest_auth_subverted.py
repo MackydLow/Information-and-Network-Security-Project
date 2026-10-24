@@ -20,6 +20,8 @@ MONITOR_KEY = "py_http_monitor"
 
 class DigestAuthSubvertedMiddleware(RequestHandlerABC):
     """Middleware that implements HTTP Digest Authentication."""
+    nonces: dict[str, float] = {} # shared across instances so nonces persist between connections
+
     def __init__(self, next: RequestHandler, pwdfile: str):
         """Set up the middleware and load the user directory from the password file"""
         self.next = next #process request once they are authenticated
@@ -38,9 +40,6 @@ class DigestAuthSubvertedMiddleware(RequestHandlerABC):
 
         #the realm names the protected area, sent to the client
         self.realm = "py_http_server"
-
-        # Dictionary to store nonces and their issue times
-        self.nonces: dict[str, float] = {}
 
     def _generate_nonce(self) -> str:
         """Create a new random nonce record when it was issued and return"""
