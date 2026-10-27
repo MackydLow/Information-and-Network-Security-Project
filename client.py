@@ -1,12 +1,41 @@
 import hashlib
 import getpass
 import socket
+import re
+import secrets
 
 #Server connection settings
 #127.0.0.1 is a loopback adress that points to this machine
 #8080 is the port number that this server will use as it is default for a http server
 HOST = "127.0.0.1"
 PORT = 8080
+
+def sha256(text):
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+def send_request(auth_header=None):
+    request = (
+          "GET / HTTP/1.1\r\n"
+          f"Host: {HOST}:{PORT}\r\n"
+     )
+
+    if auth_header:
+        request += f"Authorization: {auth_header}\r\n"
+
+    request += "Connection: close\r\n\r\n"
+
+    with socket.create_connection((HOST, PORT), timeout=10) as client_socket:
+        client_socket.sendall(request.encode("utf-8"))
+
+        response = bytearray()
+        while True:
+            chunk = client_socket.recv(4096)
+            if not chunk:
+                break
+            response.extend(chunk)
+
+        return response.decode("utf-8", errors="replace")
+
 
 #Main Client Function
 def main():
@@ -15,6 +44,72 @@ def main():
     username = input("Enter your username: ")
     password = getpass.getpass("Enter your password: ")
 
+    challenge_response = send_request()
+
+    print("Initial response:", challenge_response.splitlines()[0])
+
+    challenge = re.search(r'WWW-Authenticate:\s*Digest\s+([^\r\n]+)',
+                          challenge_response, 
+                          re.IGNORECASE)
+    if not challenge:
+        print(" No Digest challenge recieved from the server.")
+        print(challenge_response)
+        return
+
+    challenge_data = challenge.group(1)
+
+    realm_match = re.search(r'realm="([^"]+)"', challenge_data)
+    nonce_match = re.search(r'nonce="([^"]+)"', challenge_data)
+
+    if not realm_match or not nonce_match:
+        print("Could not read the Digest challenge.")
+        return
+
+    realm = realm_match.group(1)
+    nonce = nonce_match.group(1)
+
+    uri = "/"
+    method = "GET"
+    qop = "auth"
+    nc = "00000001"
+    cnonce = secrets.token_hex(16)
+
+    stored_hash = sha256(password)
+    ha1 = sha256(f"{username}:{realm}:{stored_hash}")
+    ha2 = sha256(f"{method}:{uri}")
+
+    response_hash = sha256(f"{ha1}:{nonce}:{nc}:{cnonce}:{qop}:{ha2}")
+
+    auth_header = (
+        f'Digest username="{username}", '
+        f'realm="{realm}", '
+        f'nonce="{nonce}", '
+        f'uri="{uri}", '
+        f'response="{response_hash}", '
+        f'qop={qop}, '
+        f'nc={nc}, '
+        f'cnonce="{cnonce}", '
+        f'algorithm=SHA-256'
+    )
+
+    # Send the authenticated request
+    authenticated_response = send_request(auth_header)
+
+    # Print the status and full response
+    print("\nAuthenticated response:")
+    print(authenticated_response)
+
+    # Send the second request with the Digest Authentication header
+    authenticated_response = send_request(auth_header)
+
+    # Display the server's response
+    print("\nAuthenticated response:")
+    print(authenticated_response.splitlines()[0])
+
+    # Display the complete response for debugging
+    print(authenticated_response)
+
+    """
     #Hash the password using SHA-256 from the standard library
     #This is encoded as a hexidecimal string to be sent over the network
     hashed_password = hashlib.sha256(password.encode()).hexdigest()
@@ -66,10 +161,11 @@ def main():
 
             #Print the rest of the response body (if any)
             print("Response body:")
-            print(response_text)
+            print(response_text)"""
 
 if __name__ == "__main__":
     main()
+
         
 
 
