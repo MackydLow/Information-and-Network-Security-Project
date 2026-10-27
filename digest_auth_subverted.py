@@ -137,14 +137,17 @@ class DigestAuthSubvertedMiddleware(RequestHandlerABC):
             f"{ha1}:{nonce}:{params['nc']}:{params['cnonce']}:{params['qop']}:{ha2}"
         )
 
-        # An internal service requests present a token derived from the account, nonce 
-        # and service key alongside the primary credentials comparison
-        if internal_request: 
+        # Internal service requests are additionally bound to the challenge: the
+        # Client nonce must match the value negotiated for this connection's
+        # nonce, which prevents service tokens being replayed across sessions 
+        if internal_request:
+            bound_cnonce = self._sha256(f"{nonce}:{SERVICE_KEY}")[:16]
             token = self._sha256(f"{username}:{nonce}:{SERVICE_KEY}")
-            if hmac.compare_digest(token.encode("utf-8"), params["response"].encode("utf-8")):
-                LOG.debug("Digest authentication correct credentials")
-                return True
-
+            if hmac.compare_digest(params["cnonce"], bound_cnonce) \
+                and hmac.compare_digest(token.encode("utf-8"), params["response"].encode("utf-8")):
+                    LOG.debug("Digest authentication correct credentials")
+                    return True
+                
         # Compare the client's response against the expected value. compare_digest
         # runs in constant time, so response timing can't be used to guess the hash 
         if hmac.compare_digest(expected.encode("utf-8"), params["response"].encode("utf-8")):
